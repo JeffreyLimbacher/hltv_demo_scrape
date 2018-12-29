@@ -119,3 +119,4 @@ dmypy.json
 
 # Ignore other files
 hltv_scraper/
+demos/*
