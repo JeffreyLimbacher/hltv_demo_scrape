@@ -1,0 +1,1 @@
+cat urls.txt | sed 's/\r//g' | xargs -I _ curl -LJ -C - -O "http://www.hltv.org_"

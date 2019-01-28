@@ -1,6 +1,6 @@
-
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED, ALL_COMPLETED
 from datetime import datetime
+import json
 import os
 import re
 import time
@@ -14,22 +14,24 @@ from selenium import webdriver
 from selenium.webdriver.common.keys import Keys
 from selenium.common.exceptions import NoSuchElementException
 
-
-
 WEBSITE = r'https://www.hltv.org'
 BASE_URL = WEBSITE + r'/results'
 DEMO_FOLDER = os.getcwd() + r'/demos'
-START_OFFSET = 0
+START_OFFSET = 4900
+END_OFFSET = 10000
+OUT_FILE = 'urls.txt'
 
 last_update = datetime.min
 
-
-
-top10_c9 = ['astralis', 'liquid', 'natus vincere', 'mibr', 'faze', 'mousesports', 'nip', 'nrg', 'big', 'north', 'cloud9']
+top10_c9 = [
+    'astralis', 'liquid', 'natus vincere', 'mibr', 'faze', 'mousesports',
+    'nip', 'nrg', 'big', 'north', 'cloud9'
+]
 
 executor = ThreadPoolExecutor(max_workers=2)
 
 futures = []
+
 
 def upload_demo(demo_file):
     env = Env()
@@ -40,20 +42,31 @@ def upload_demo(demo_file):
 
     file_path = DEMO_FOLDER + '\\' + demo_file
     try:
-        s3_connection = boto3.resource('s3', region_name=region_name, aws_access_key_id=aws_access_key_id, aws_secret_access_key=aws_secret_key_id)
+        s3_connection = boto3.resource(
+            's3',
+            region_name=region_name,
+            aws_access_key_id=aws_access_key_id,
+            aws_secret_access_key=aws_secret_key_id)
         s3_connection.Bucket(bucket).upload_file(file_path, demo_file)
         os.remove(file_path)
         return None
     except Exception:
         return demo_file
 
+
 def parse_results_page(html):
+    """
+    Parses the all results page from HLTV:
+    https://www.hltv.org/results
+    Try to queue only games that have at least one star or cloud9 in it
+    """
     results_soup = BeautifulSoup(html, 'html.parser')
 
     # Ignore the featured results at the top of the page. We find the overall results div, then get the direct child
     # that is called results-holder
     all_results = results_soup.find('div', {'class': 'results'})
-    no_featured = all_results.find('div', {'class': 'results-holder'}, recursive=False)
+    no_featured = all_results.find(
+        'div', {'class': 'results-holder'}, recursive=False)
 
     entries = no_featured.find_all('div', {'class': 'result-con'})
 
@@ -72,20 +85,49 @@ def parse_results_page(html):
 
     urls = [t.a['href'] for t in entries]
     assert len(team1s) == len(urls)
+
     jobs = []
-    for i in range(len(team1s)):
-        top10_game = team1s[i].lower() in top10_c9 or team2s[i].lower() in top10_c9
-        if top10_game:
+    for i, entry in enumerate(entries):
+        star_div = entry.find('td', {'class': 'star-cell'})
+        stars = star_div.find('i')
+        if stars is not None:
+            jobs.append(urls[i])
+            continue
+        # else see if it has cloud9
+        is_c9_game = team1s[i].lower() == 'cloud9' or team2s[i].lower(
+        ) == 'cloud9'
+        if is_c9_game:
             jobs.append(urls[i])
     jobs = [WEBSITE + j for j in jobs]
     return jobs
 
 
-def queue_demo_inferno(html):
+def queue_demo_inferno(result_url):
+    """
+    This method just checks if a match page contains inferno as a played map.
+    If it does, it will return the url of the demo. If not, it just returns None.
+    """
+    html = get_page(result_url)
+
     results_soup = BeautifulSoup(html, 'html.parser')
 
     played_maps = results_soup.findAll('div', {'class': 'played'})
-    for 
+    found_inferno = False
+    for p in played_maps:
+        mapname_div = p.find('div', {'class': 'mapname'})
+        if mapname_div.text.lower() == 'inferno':
+            found_inferno = True
+            break
+    if not found_inferno:
+        return None
+
+    try:
+        for elem in results_soup(text='GOTV Demo'):
+            break
+        url = elem.parent['href']
+        return url
+    except:
+        return None
 
 
 def parse_result_page(html):
@@ -107,25 +149,23 @@ def parse_result_page(html):
         else:
             team_info['id'] = None
         team_info['name'] = t.find('div', {'class': 'teamName'}).text
-        team_info['score'] = t.find(prefix+'-gradient').find('div').text
+        team_info['score'] = t.find(prefix + '-gradient').find('div').text
 
         # Add the prefix to the above to eventually convert to flat
-        temp_dict = {(prefix+k): team_info[k] for k in team_info}
+        temp_dict = {(prefix + k): team_info[k] for k in team_info}
         result = {**result, **temp_dict}
-    
+
     time_and_event = match_page.find('div', {'class': 'timeAndEvent'})
     result['time'] = time_and_event.find('div', {'class': 'date'})['data-unix']
-    
+
     event = time_and_event.find('div', {'class': 'event'})
     result['event'] = event.a.text
     event_id = re.search(r'/events/(\d+)', event.a['href'])
     result['event_id'] = event_id.group(1) if event_id else None
 
 
-
-
 def block_until_free_thread():
-    while(len(futures) >= 2):
+    while (len(futures) >= 2):
         futures_part = wait(futures, FIRST_COMPLETED)
         futures = futures_part.not_done
 
@@ -133,19 +173,19 @@ def block_until_free_thread():
 def process_results_page(result_url):
     get_page(result_url)
     try:
-        demo_stream_box = session.find_element_by_partial_link_text(r'GOTV Demo')
+        demo_stream_box = session.find_element_by_partial_link_text(
+            r'GOTV Demo')
     except NoSuchElementException:
         print('No GOTV demo found for ' + result_url)
         return
-    # Before we click let's get a list of the file names in the directory for later on. 
+    # Before we click let's get a list of the file names in the directory for later on.
     # Use the new file not appearing in this list to know which file we got
     preclick_files = file_names = os.listdir(DEMO_FOLDER)
     demo_stream_box.click()
     #parse the result page
 
     #parse_result_page(html)
-    
-    
+
     # Sleep to give it some time to create the file
     time.sleep(20)
     # Firefox leaves a .rar.part file in the directory while it is downloading. The best way to detect if we are done downloading
@@ -159,46 +199,47 @@ def process_results_page(result_url):
     # How to handle?
     assert len(new_file_set) == 1
 
-    new_file_name = new_file_set.pop() 
-    # Now batch the file for uploading to s3 
+    new_file_name = new_file_set.pop()
+    # Now batch the file for uploading to s3
     futures.append(executor.submit(upload_demo, new_file_name))
-    
 
 
-
-def get_page(url, params= None):
+def get_page(url, params=None):
     if params is not None:
-        param_str = '&'.join([p + '=' + str(params[p]) for p in params])    
+        param_str = '&'.join([p + '=' + str(params[p]) for p in params])
         url_enc = url + '?' + param_str
     else:
         url_enc = url
     since_last_request = (datetime.now() - last_update).total_seconds()
     if since_last_request < 1:
-        time.sleep(since_last_request) 
+        time.sleep(since_last_request)
     session.get(url_enc)
     return session.page_source
-    
+
+
 if __name__ == '__main__':
-    
+
     # See https://selenium-python.readthedocs.io/faq.html#how-to-auto-save-files-using-custom-firefox-profile
     fp = webdriver.FirefoxProfile()
 
-    fp.set_preference("browser.download.folderList",2)
-    fp.set_preference("browser.download.manager.showWhenStarting",False)
+    fp.set_preference("browser.download.folderList", 2)
+    fp.set_preference("browser.download.manager.showWhenStarting", False)
     fp.set_preference("browser.download.dir", DEMO_FOLDER)
-    fp.set_preference("browser.helperApps.neverAsk.saveToDisk", "application/x-rar-compressed")
-
+    fp.set_preference("browser.helperApps.neverAsk.saveToDisk",
+                      "application/x-rar-compressed")
 
     session = webdriver.Firefox(firefox_profile=fp)
     offset = START_OFFSET
-
-    while offset < 3000:
-       
-        text = get_page(BASE_URL, params={'offset':offset})
+    demo_urls = []
+    while offset < END_OFFSET:
+        print("Starting offset {}".format(offset))
+        text = get_page(BASE_URL, params={'offset': offset})
         jobs = parse_results_page(text)
-        list(map(process_results_page, jobs))
+        new_demos = [x for x in map(queue_demo_inferno, jobs) if x]
+        demo_urls.extend(new_demos)
 
         offset += 100
-    
-    wait(futures, ALL_COMPLETED)
+
+    open(OUT_FILE,'w').write('\n'.join(demo_urls))
+    #wait(futures, ALL_COMPLETED)
     #r._from_results_page(r.text)
